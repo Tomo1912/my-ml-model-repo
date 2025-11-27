@@ -6,7 +6,8 @@ app = FastAPI(title="ML Deployment Service")
 
 
 # Dummy model: y = 2x + 5
-# # Ovo je nova, nebitna linija koda koja okida pipeline.
+# Ovo je nova, nebitna linija koda koja okida pipeline...
+# Dodajemo razmak da forsiramo trigger...
 @app.get("/predict/{number}")
 def predict(number: int):
     """Simple linear prediction."""
