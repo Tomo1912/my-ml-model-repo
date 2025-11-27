@@ -11,7 +11,7 @@ app = FastAPI(title="ML Deployment Service")
 @app.get("/predict/{number}")
 def predict(number: int):
     """Simple linear prediction."""
-    result = 2 * number + 5
+    result = 2 * number + 6
     return {"input": number, "prediction": result, "model_version": "v1.0.0"}
 
 
