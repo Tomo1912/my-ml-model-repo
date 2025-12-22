@@ -165,12 +165,3 @@ The model is trained on the **California Housing Dataset** from scikit-learn, wh
 - 8 features including median income, house age, location, etc.
 - Target: Median house value (in $100,000s)
 
-## 👤 Author
-
-**Tomislav Martić**
-- GitHub: [@Tomo1912](https://github.com/Tomo1912)
-
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE).
-
