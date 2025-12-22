@@ -1,0 +1,19 @@
+{
+  "model_type": "RandomForestRegressor",
+  "n_estimators": 100,
+  "features": [
+    "MedInc",
+    "HouseAge",
+    "AveRooms",
+    "AveBedrms",
+    "Population",
+    "AveOccup",
+    "Latitude",
+    "Longitude"
+  ],
+  "mae": 33290.87229580155,
+  "r2_score": 0.8006306278866671,
+  "training_samples": 16512,
+  "test_samples": 4128,
+  "version": "1.0.0"
+}
