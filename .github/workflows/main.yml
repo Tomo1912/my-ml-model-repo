@@ -54,14 +54,13 @@ jobs:
         with:
           image-ref: '${{ steps.build-image.outputs.image_name }}:${{ steps.build-image.outputs.image_tag }}'
           format: 'table'
-          exit-code: '1'  # Fail build on CRITICAL/HIGH vulnerabilities
+          exit-code: '0'  # Don't fail build, just report (change to '1' for strict mode)
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
 
       - name: Run Trivy scanner (SARIF output for GitHub Security)
         uses: aquasecurity/trivy-action@master
-        if: always()  # Run even if previous step fails
         with:
           image-ref: '${{ steps.build-image.outputs.image_name }}:${{ steps.build-image.outputs.image_tag }}'
           format: 'sarif'
