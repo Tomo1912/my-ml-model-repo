@@ -1,5 +1,10 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-scikit-learn>=1.5.0
-numpy>=1.26.0
-pandas>=2.1.0
+# Pinned versions for security and reproducibility
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+scikit-learn==1.5.2
+numpy==2.2.1
+pandas==2.2.3
+
+# Security packages
+slowapi==0.1.9
+python-multipart==0.0.20

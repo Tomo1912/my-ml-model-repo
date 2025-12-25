@@ -1,30 +1,118 @@
 """
 House Price Prediction API
 A production-ready ML service for predicting California house prices.
+
+Security Features:
+- Rate limiting to prevent DoS attacks
+- Input validation with strict bounds
+- CORS configuration
+- Security headers
+- Non-root Docker user
+- Request size limits
 """
 
 import pickle
 import json
+import hashlib
+import logging
 from pathlib import Path
 from typing import List
+from datetime import datetime
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import numpy as np
 
-# Initialize FastAPI app
+# Configure logging (don't expose sensitive info)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Rate limiter setup
+limiter = Limiter(key_func=get_remote_address)
+
+# Initialize FastAPI app with security settings
 app = FastAPI(
     title="House Price Prediction API",
     description="ML-powered API for predicting California house prices using Random Forest",
-    version="2.0.0"
+    version="2.0.0",
+    docs_url="/docs",  # Can be set to None in production
+    redoc_url=None,    # Disable redoc
+    openapi_url="/openapi.json"  # Can be set to None in production
 )
+
+# Add rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS Configuration - restrict to specific origins in production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production: ["https://yourdomain.com"]
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+# Request size limit middleware
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    MAX_REQUEST_SIZE = 10 * 1024  # 10KB max
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_REQUEST_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request too large"}
+        )
+    return await call_next(request)
 
 # Load model and metadata at startup
 MODEL_PATH = Path("model.pkl")
 METADATA_PATH = Path("model_metadata.json")
+MODEL_HASH_PATH = Path("model_hash.txt")
 
 model = None
 metadata = None
+
+
+def verify_model_integrity(model_path: Path) -> bool:
+    """Verify model file integrity using SHA256 hash."""
+    if not MODEL_HASH_PATH.exists():
+        logger.warning("Model hash file not found - skipping integrity check")
+        return True
+
+    with open(model_path, 'rb') as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+
+    with open(MODEL_HASH_PATH, 'r') as f:
+        expected_hash = f.read().strip()
+
+    if file_hash != expected_hash:
+        logger.error("Model integrity check FAILED!")
+        return False
+
+    logger.info("Model integrity check passed")
+    return True
 
 
 @app.on_event("startup")
@@ -33,24 +121,35 @@ async def load_model():
     global model, metadata
 
     if not MODEL_PATH.exists():
+        logger.error(f"Model file not found: {MODEL_PATH}")
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
-    with open(MODEL_PATH, 'rb') as f:
-        model = pickle.load(f)
+    # Verify model integrity before loading
+    # Note: pickle is still vulnerable to RCE if model file is compromised
+    # In production, consider using safer formats like ONNX or joblib with signing
+    if not verify_model_integrity(MODEL_PATH):
+        raise ValueError("Model integrity verification failed")
+
+    try:
+        with open(MODEL_PATH, 'rb') as f:
+            model = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise
 
     if METADATA_PATH.exists():
         with open(METADATA_PATH, 'r') as f:
             metadata = json.load(f)
 
-    print("✅ Model loaded successfully!")
-    print(f"   Model type: {metadata.get('model_type', 'Unknown')}")
-    print(f"   R² Score: {metadata.get('r2_score', 'N/A')}")
-    print(f"   MAE: ${metadata.get('mae', 'N/A'):.2f}")
+    logger.info("✅ Model loaded successfully!")
+    logger.info(f"   Model type: {metadata.get('model_type', 'Unknown')}")
+    logger.info(f"   R² Score: {metadata.get('r2_score', 'N/A')}")
+    logger.info(f"   MAE: ${metadata.get('mae', 'N/A'):.2f}")
 
 
-# Pydantic models for request/response validation
+# Pydantic models for request/response validation with strict validation
 class HouseFeaturesInput(BaseModel):
-    """Input features for house price prediction."""
+    """Input features for house price prediction with strict validation."""
     median_income: float = Field(..., description="Median income in block group (in $10,000s)", ge=0, le=15)
     house_age: float = Field(..., description="Median house age in block group", ge=1, le=52)
     avg_rooms: float = Field(..., description="Average number of rooms per household", ge=1, le=20)
@@ -59,6 +158,14 @@ class HouseFeaturesInput(BaseModel):
     avg_occupancy: float = Field(..., description="Average number of household members", ge=0.5, le=15)
     latitude: float = Field(..., description="Block group latitude", ge=32.5, le=42)
     longitude: float = Field(..., description="Block group longitude", ge=-124.5, le=-114)
+
+    @validator('*', pre=True)
+    def check_not_nan_or_inf(cls, v):
+        """Prevent NaN and Inf values that could cause model issues."""
+        if isinstance(v, float):
+            if np.isnan(v) or np.isinf(v):
+                raise ValueError("NaN or Inf values are not allowed")
+        return v
 
     class Config:
         json_schema_extra = {
@@ -95,42 +202,63 @@ class ModelInfoResponse(BaseModel):
 
 # API Endpoints
 @app.post("/predict", response_model=PredictionResponse)
-async def predict_house_price(features: HouseFeaturesInput):
+@limiter.limit("30/minute")  # Rate limit: 30 requests per minute per IP
+async def predict_house_price(request: Request, features: HouseFeaturesInput):
     """
     Predict house price based on input features.
 
     Returns the predicted price in USD (median house value for the block group).
+    Rate limited to 30 requests per minute.
     """
     if model is None:
+        logger.error("Prediction attempted but model not loaded")
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    # Prepare input features in correct order
-    input_array = np.array([[
-        features.median_income,
-        features.house_age,
-        features.avg_rooms,
-        features.avg_bedrooms,
-        features.population,
-        features.avg_occupancy,
-        features.latitude,
-        features.longitude
-    ]])
+    try:
+        # Prepare input features in correct order
+        input_array = np.array([[
+            features.median_income,
+            features.house_age,
+            features.avg_rooms,
+            features.avg_bedrooms,
+            features.population,
+            features.avg_occupancy,
+            features.latitude,
+            features.longitude
+        ]], dtype=np.float64)
 
-    # Make prediction
-    prediction = model.predict(input_array)[0]
+        # Validate array doesn't contain NaN/Inf after conversion
+        if np.any(np.isnan(input_array)) or np.any(np.isinf(input_array)):
+            raise HTTPException(status_code=400, detail="Invalid numeric values")
 
-    # Convert from $100,000s to USD
-    predicted_price = float(prediction * 100000)
+        # Make prediction
+        prediction = model.predict(input_array)[0]
 
-    return PredictionResponse(
-        predicted_price=predicted_price,
-        model_version=metadata.get("version", "2.0.0"),
-        features_used=features.dict()
-    )
+        # Validate prediction is reasonable
+        if prediction < 0 or prediction > 100:  # $0 to $10M range
+            logger.warning(f"Unusual prediction value: {prediction}")
+
+        # Convert from $100,000s to USD
+        predicted_price = float(prediction * 100000)
+
+        # Log prediction (without sensitive data)
+        logger.info(f"Prediction made: ${predicted_price:.2f}")
+
+        return PredictionResponse(
+            predicted_price=predicted_price,
+            model_version=metadata.get("version", "2.0.0"),
+            features_used=features.dict()
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(status_code=500, detail="Prediction failed")
 
 
 @app.get("/model/info", response_model=ModelInfoResponse)
-async def get_model_info():
+@limiter.limit("60/minute")
+async def get_model_info(request: Request):
     """Get information about the deployed model."""
     if metadata is None:
         raise HTTPException(status_code=503, detail="Model metadata not available")
@@ -147,8 +275,9 @@ async def get_model_info():
 
 
 @app.get("/health")
-def health_check():
-    """Health check endpoint."""
+@limiter.limit("120/minute")
+def health_check(request: Request):
+    """Health check endpoint for load balancers and monitoring."""
     return {
         "status": "healthy",
         "model_loaded": model is not None,
@@ -157,7 +286,8 @@ def health_check():
 
 
 @app.get("/")
-def root():
+@limiter.limit("60/minute")
+def root(request: Request):
     """Root endpoint with API information."""
     return {
         "service": "House Price Prediction API",
@@ -172,4 +302,11 @@ def root():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # In production, use gunicorn with multiple workers
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+        access_log=True
+    )
