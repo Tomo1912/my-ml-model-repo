@@ -33,7 +33,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PAT_TOKEN_2 }}
 
-      - name: Build Docker Image
+      - name: Set up QEMU (for multi-arch builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build and Push Docker Image (Multi-arch)
         id: build-image
         env:
           IMAGE_TAG: ${{ github.sha }}
@@ -41,10 +44,21 @@ jobs:
           REPO_OWNER_LOWERCASE=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
           IMAGE_NAME="ghcr.io/$REPO_OWNER_LOWERCASE/ml-model"
 
-          docker build -t $IMAGE_NAME:$IMAGE_TAG -t $IMAGE_NAME:latest .
+          # Build and push multi-arch image (amd64 + arm64)
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t $IMAGE_NAME:$IMAGE_TAG \
+            -t $IMAGE_NAME:latest \
+            --push \
+            .
 
           echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # Pull image for local scanning (single arch for Trivy)
+      - name: Pull image for scanning
+        run: |
+          docker pull ${{ steps.build-image.outputs.image_name }}:${{ steps.build-image.outputs.image_tag }}
 
       # ============================================
       # SECURITY: Trivy Container Vulnerability Scan
@@ -75,18 +89,7 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
 
-      # ============================================
-      # Push Image (only if security scan passes)
-      # ============================================
-      - name: Push Docker Image
-        run: |
-          IMAGE_NAME="${{ steps.build-image.outputs.image_name }}"
-          IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
-
-          docker push $IMAGE_NAME:$IMAGE_TAG
-          docker push $IMAGE_NAME:latest
-
-          echo "✅ Image pushed: $IMAGE_NAME:$IMAGE_TAG"
+      # Note: Image already pushed during buildx build step (multi-arch)
 
       # ------------------------------------------------------------------
       # GITOPS: Update deployment manifest
