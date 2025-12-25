@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "model.py"
+      - "model.onnx"
       - "Dockerfile"
       - "requirements.txt"
       - ".github/workflows/main.yml"
@@ -13,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
+  security-events: write  # For Trivy SARIF upload
 
 jobs:
   build_and_deploy:
@@ -31,24 +33,64 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.PAT_TOKEN_2 }}
 
-      - name: Build and Push Docker Image
+      - name: Build Docker Image
         id: build-image
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # POPRAVAK ZA GHCR (mala slova)
           REPO_OWNER_LOWERCASE=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
-
           IMAGE_NAME="ghcr.io/$REPO_OWNER_LOWERCASE/ml-model"
 
           docker build -t $IMAGE_NAME:$IMAGE_TAG -t $IMAGE_NAME:latest .
+
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ============================================
+      # SECURITY: Trivy Container Vulnerability Scan
+      # ============================================
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ steps.build-image.outputs.image_name }}:${{ steps.build-image.outputs.image_tag }}'
+          format: 'table'
+          exit-code: '1'  # Fail build on CRITICAL/HIGH vulnerabilities
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy scanner (SARIF output for GitHub Security)
+        uses: aquasecurity/trivy-action@master
+        if: always()  # Run even if previous step fails
+        with:
+          image-ref: '${{ steps.build-image.outputs.image_name }}:${{ steps.build-image.outputs.image_tag }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # ============================================
+      # Push Image (only if security scan passes)
+      # ============================================
+      - name: Push Docker Image
+        run: |
+          IMAGE_NAME="${{ steps.build-image.outputs.image_name }}"
+          IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
+
           docker push $IMAGE_NAME:$IMAGE_TAG
           docker push $IMAGE_NAME:latest
 
-          echo "image_url=$IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "✅ Image pushed: $IMAGE_NAME:$IMAGE_TAG"
 
       # ------------------------------------------------------------------
-      # GITOPS KORAK: Ažuriranje drugog repozitorija
+      # GITOPS: Update deployment manifest
       # ------------------------------------------------------------------
       - name: Checkout GitOps Repository
         uses: actions/checkout@v4
@@ -57,13 +99,14 @@ jobs:
           path: gitops-repo
           token: ${{ secrets.PAT_TOKEN_2 }}
 
-      - name: Replace Image Tag in manifest
+      - name: Update Image Tag in manifest
         run: |
-          LATEST_IMAGE=${{ steps.build-image.outputs.image_url }}
+          IMAGE_NAME="${{ steps.build-image.outputs.image_name }}"
+          IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
+          FULL_IMAGE="$IMAGE_NAME:$IMAGE_TAG"
 
-          # Mijenjamo placeholder 'REPLACE_ME_IMAGE_PATH/ml-model:v1.0.0' sa novim Image URL-om
-          # NAPOMENA: Ako je placeholder već izbrisan, sed neće ništa promijeniti, što je u redu.
-          sed -i "s|REPLACE_ME_IMAGE_PATH/ml-model:v1.0.0|$LATEST_IMAGE|g" gitops-repo/deployment.yaml
+          # Update any existing image reference
+          sed -i "s|REPLACE_ME_IMAGE_PATH/ml-model:v1.0.0|$FULL_IMAGE|g" gitops-repo/deployment.yaml
 
       - name: Commit and Push to GitOps Repo
         run: |
@@ -72,9 +115,8 @@ jobs:
           git config user.email github-actions@github.com
           git add deployment.yaml
 
-          # POPRAVAK ZA GREŠKU: Ako nema promjene, nastavi (|| true)
-          git commit -m "chore(gitops): update image to $LATEST_IMAGE" || true
+          IMAGE_NAME="${{ steps.build-image.outputs.image_name }}"
+          IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
 
+          git commit -m "chore(gitops): update image to $IMAGE_NAME:$IMAGE_TAG [security-scanned]" || true
           git push
-        env:
-          LATEST_IMAGE: ${{ steps.build-image.outputs.image_url }}

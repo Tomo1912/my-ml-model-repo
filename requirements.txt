@@ -1,10 +1,16 @@
 # Pinned versions for security and reproducibility
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-scikit-learn==1.5.2
 numpy==2.2.1
-pandas==2.2.3
+
+# ONNX Runtime for secure model inference (no arbitrary code execution)
+onnxruntime==1.20.1
 
 # Security packages
 slowapi==0.1.9
 python-multipart==0.0.20
+
+# Training dependencies (not needed in production container)
+# scikit-learn==1.5.2
+# skl2onnx==1.17.0
+# pandas==2.2.3

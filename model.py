@@ -3,31 +3,31 @@ House Price Prediction API
 A production-ready ML service for predicting California house prices.
 
 Security Features:
+- ONNX model format (safe deserialization - no arbitrary code execution)
 - Rate limiting to prevent DoS attacks
 - Input validation with strict bounds
 - CORS configuration
 - Security headers
 - Non-root Docker user
 - Request size limits
+- Model integrity verification (SHA256)
 """
 
-import pickle
 import json
 import hashlib
 import logging
 from pathlib import Path
 from typing import List
-from datetime import datetime
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import numpy as np
+import onnxruntime as ort
 
 # Configure logging (don't expose sensitive info)
 logging.basicConfig(
@@ -87,11 +87,12 @@ async def limit_request_size(request: Request, call_next):
     return await call_next(request)
 
 # Load model and metadata at startup
-MODEL_PATH = Path("model.pkl")
+MODEL_PATH = Path("model.onnx")
 METADATA_PATH = Path("model_metadata.json")
 MODEL_HASH_PATH = Path("model_hash.txt")
 
-model = None
+# ONNX Runtime session (thread-safe)
+ort_session = None
 metadata = None
 
 
@@ -108,33 +109,35 @@ def verify_model_integrity(model_path: Path) -> bool:
         expected_hash = f.read().strip()
 
     if file_hash != expected_hash:
-        logger.error("Model integrity check FAILED!")
+        logger.error(f"Model integrity check FAILED! Expected: {expected_hash[:16]}..., Got: {file_hash[:16]}...")
         return False
 
-    logger.info("Model integrity check passed")
+    logger.info(f"Model integrity check passed (SHA256: {file_hash[:16]}...)")
     return True
 
 
 @app.on_event("startup")
 async def load_model():
-    """Load the trained model and metadata on startup."""
-    global model, metadata
+    """Load the ONNX model and metadata on startup."""
+    global ort_session, metadata
 
     if not MODEL_PATH.exists():
         logger.error(f"Model file not found: {MODEL_PATH}")
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
     # Verify model integrity before loading
-    # Note: pickle is still vulnerable to RCE if model file is compromised
-    # In production, consider using safer formats like ONNX or joblib with signing
     if not verify_model_integrity(MODEL_PATH):
         raise ValueError("Model integrity verification failed")
 
     try:
-        with open(MODEL_PATH, 'rb') as f:
-            model = pickle.load(f)
+        # ONNX Runtime is SAFE - it only loads model weights, not arbitrary code
+        # This prevents Remote Code Execution (RCE) attacks via malicious model files
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        ort_session = ort.InferenceSession(str(MODEL_PATH), sess_options)
+        logger.info("ONNX Runtime session created successfully")
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
+        logger.error(f"Failed to load ONNX model: {e}")
         raise
 
     if METADATA_PATH.exists():
@@ -142,6 +145,7 @@ async def load_model():
             metadata = json.load(f)
 
     logger.info("✅ Model loaded successfully!")
+    logger.info(f"   Model format: ONNX (secure)")
     logger.info(f"   Model type: {metadata.get('model_type', 'Unknown')}")
     logger.info(f"   R² Score: {metadata.get('r2_score', 'N/A')}")
     logger.info(f"   MAE: ${metadata.get('mae', 'N/A'):.2f}")
@@ -159,7 +163,8 @@ class HouseFeaturesInput(BaseModel):
     latitude: float = Field(..., description="Block group latitude", ge=32.5, le=42)
     longitude: float = Field(..., description="Block group longitude", ge=-124.5, le=-114)
 
-    @validator('*', pre=True)
+    @field_validator('*', mode='before')
+    @classmethod
     def check_not_nan_or_inf(cls, v):
         """Prevent NaN and Inf values that could cause model issues."""
         if isinstance(v, float):
@@ -167,8 +172,8 @@ class HouseFeaturesInput(BaseModel):
                 raise ValueError("NaN or Inf values are not allowed")
         return v
 
-    class Config:
-        json_schema_extra = {
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "median_income": 8.3252,
                 "house_age": 41.0,
@@ -180,6 +185,7 @@ class HouseFeaturesInput(BaseModel):
                 "longitude": -122.23
             }
         }
+    }
 
 
 class PredictionResponse(BaseModel):
@@ -209,13 +215,14 @@ async def predict_house_price(request: Request, features: HouseFeaturesInput):
 
     Returns the predicted price in USD (median house value for the block group).
     Rate limited to 30 requests per minute.
+    Uses ONNX Runtime for secure inference.
     """
-    if model is None:
+    if ort_session is None:
         logger.error("Prediction attempted but model not loaded")
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        # Prepare input features in correct order
+        # Prepare input features in correct order (ONNX expects float32)
         input_array = np.array([[
             features.median_income,
             features.house_age,
@@ -225,14 +232,15 @@ async def predict_house_price(request: Request, features: HouseFeaturesInput):
             features.avg_occupancy,
             features.latitude,
             features.longitude
-        ]], dtype=np.float64)
+        ]], dtype=np.float32)
 
         # Validate array doesn't contain NaN/Inf after conversion
         if np.any(np.isnan(input_array)) or np.any(np.isinf(input_array)):
             raise HTTPException(status_code=400, detail="Invalid numeric values")
 
-        # Make prediction
-        prediction = model.predict(input_array)[0]
+        # Make prediction using ONNX Runtime (secure - no arbitrary code execution)
+        input_name = ort_session.get_inputs()[0].name
+        prediction = ort_session.run(None, {input_name: input_array})[0][0]
 
         # Validate prediction is reasonable
         if prediction < 0 or prediction > 100:  # $0 to $10M range
@@ -247,7 +255,7 @@ async def predict_house_price(request: Request, features: HouseFeaturesInput):
         return PredictionResponse(
             predicted_price=predicted_price,
             model_version=metadata.get("version", "2.0.0"),
-            features_used=features.dict()
+            features_used=features.model_dump()
         )
     except HTTPException:
         raise
@@ -280,7 +288,8 @@ def health_check(request: Request):
     """Health check endpoint for load balancers and monitoring."""
     return {
         "status": "healthy",
-        "model_loaded": model is not None,
+        "model_loaded": ort_session is not None,
+        "model_format": "ONNX",
         "service": "House Price Prediction API"
     }
 

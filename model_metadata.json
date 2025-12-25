@@ -1,5 +1,6 @@
 {
   "model_type": "RandomForestRegressor",
+  "model_format": "ONNX",
   "n_estimators": 100,
   "features": [
     "MedInc",
@@ -15,5 +16,6 @@
   "r2_score": 0.8006306278866671,
   "training_samples": 16512,
   "test_samples": 4128,
-  "version": "1.0.0"
+  "version": "2.0.0",
+  "model_hash": "9ea4279d564046fd41d381a0d9eb1bba15baa5cc127f8538a1de15ff30363c6f"
 }

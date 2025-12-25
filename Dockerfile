@@ -9,9 +9,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and trained model
+# Copy application code and trained model (ONNX format - secure)
 COPY model.py .
-COPY model.pkl .
+COPY model.onnx .
 COPY model_metadata.json .
 COPY model_hash.txt .
 
