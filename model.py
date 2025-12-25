@@ -21,7 +21,7 @@ from typing import List
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -70,7 +70,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -151,17 +151,17 @@ async def load_model():
     logger.info(f"   MAE: ${metadata.get('mae', 'N/A'):.2f}")
 
 
-# Pydantic models for request/response validation with strict validation
+# Pydantic models for request/response validation with relaxed validation
 class HouseFeaturesInput(BaseModel):
-    """Input features for house price prediction with strict validation."""
-    median_income: float = Field(..., description="Median income in block group (in $10,000s)", ge=0, le=15)
-    house_age: float = Field(..., description="Median house age in block group", ge=1, le=52)
-    avg_rooms: float = Field(..., description="Average number of rooms per household", ge=1, le=20)
-    avg_bedrooms: float = Field(..., description="Average number of bedrooms per household", ge=0.5, le=10)
-    population: float = Field(..., description="Block group population", ge=3, le=10000)
-    avg_occupancy: float = Field(..., description="Average number of household members", ge=0.5, le=15)
-    latitude: float = Field(..., description="Block group latitude", ge=32.5, le=42)
-    longitude: float = Field(..., description="Block group longitude", ge=-124.5, le=-114)
+    """Input features for house price prediction with relaxed validation."""
+    median_income: float = Field(..., description="Median income in block group (in $10,000s)", ge=0, le=50)
+    house_age: float = Field(..., description="Median house age in block group", ge=0, le=200)
+    avg_rooms: float = Field(..., description="Average number of rooms per household", ge=0, le=100)
+    avg_bedrooms: float = Field(..., description="Average number of bedrooms per household", ge=0, le=50)
+    population: float = Field(..., description="Block group population", ge=0, le=100000)
+    avg_occupancy: float = Field(..., description="Average number of household members", ge=0, le=100)
+    latitude: float = Field(..., description="Block group latitude", ge=-90, le=90)
+    longitude: float = Field(..., description="Block group longitude", ge=-180, le=180)
 
     @field_validator('*', mode='before')
     @classmethod
@@ -294,20 +294,141 @@ def health_check(request: Request):
     }
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 @limiter.limit("60/minute")
 def root(request: Request):
-    """Root endpoint with API information."""
-    return {
-        "service": "House Price Prediction API",
-        "version": "2.0.0",
-        "endpoints": {
-            "predict": "/predict (POST)",
-            "model_info": "/model/info (GET)",
-            "health": "/health (GET)",
-            "docs": "/docs (GET)"
-        }
-    }
+    """Root endpoint - HTML frontend for house price prediction."""
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏠 House Price Prediction</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; }
+        .card { background: white; border-radius: 20px; padding: 30px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        h1 { text-align: center; color: #333; margin-bottom: 10px; font-size: 2em; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 30px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #555; font-weight: 600; font-size: 0.9em; }
+        input { width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 1em; transition: border-color 0.3s; }
+        input:focus { outline: none; border-color: #667eea; }
+        .row { display: flex; gap: 15px; }
+        .row .form-group { flex: 1; }
+        button { width: 100%; padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; font-size: 1.1em; font-weight: 600; cursor: pointer; margin-top: 20px; transition: transform 0.2s, box-shadow 0.2s; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4); }
+        button:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+        .result { margin-top: 25px; padding: 20px; border-radius: 15px; text-align: center; display: none; }
+        .result.success { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
+        .result.error { background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); color: white; }
+        .price { font-size: 2.5em; font-weight: bold; margin: 10px 0; }
+        .links { text-align: center; margin-top: 20px; }
+        .links a { color: #667eea; margin: 0 10px; text-decoration: none; font-weight: 600; }
+        .links a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🏠 House Price Prediction</h1>
+            <p class="subtitle">Enter house features to get a price estimate</p>
+            <form id="predictForm">
+                <div class="row">
+                    <div class="form-group">
+                        <label>💰 Median Income ($10k)</label>
+                        <input type="number" id="median_income" step="0.01" value="8.32" required>
+                    </div>
+                    <div class="form-group">
+                        <label>📅 House Age (years)</label>
+                        <input type="number" id="house_age" step="1" value="41" required>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label>🛋️ Avg Rooms</label>
+                        <input type="number" id="avg_rooms" step="0.01" value="6.98" required>
+                    </div>
+                    <div class="form-group">
+                        <label>🛏️ Avg Bedrooms</label>
+                        <input type="number" id="avg_bedrooms" step="0.01" value="1.02" required>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label>👥 Population</label>
+                        <input type="number" id="population" step="1" value="322" required>
+                    </div>
+                    <div class="form-group">
+                        <label>🏠 Avg Occupancy</label>
+                        <input type="number" id="avg_occupancy" step="0.01" value="2.55" required>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label>📍 Latitude</label>
+                        <input type="number" id="latitude" step="0.01" value="37.88" required>
+                    </div>
+                    <div class="form-group">
+                        <label>📍 Longitude</label>
+                        <input type="number" id="longitude" step="0.01" value="-122.23" required>
+                    </div>
+                </div>
+                <button type="submit" id="submitBtn">🔮 Predict Price</button>
+            </form>
+            <div id="result" class="result"></div>
+            <div class="links">
+                <a href="/docs">📚 API Docs</a>
+                <a href="/health">❤️ Health</a>
+                <a href="/model/info">ℹ️ Model Info</a>
+            </div>
+        </div>
+    </div>
+    <script>
+        document.getElementById('predictForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const result = document.getElementById('result');
+            btn.disabled = true;
+            btn.textContent = '⏳ Predicting...';
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        median_income: parseFloat(document.getElementById('median_income').value),
+                        house_age: parseFloat(document.getElementById('house_age').value),
+                        avg_rooms: parseFloat(document.getElementById('avg_rooms').value),
+                        avg_bedrooms: parseFloat(document.getElementById('avg_bedrooms').value),
+                        population: parseFloat(document.getElementById('population').value),
+                        avg_occupancy: parseFloat(document.getElementById('avg_occupancy').value),
+                        latitude: parseFloat(document.getElementById('latitude').value),
+                        longitude: parseFloat(document.getElementById('longitude').value)
+                    })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    result.className = 'result success';
+                    result.innerHTML = '<div>Predicted Price</div><div class="price">$' + data.predicted_price.toLocaleString('en-US', {maximumFractionDigits: 0}) + '</div><div>Model v' + data.model_version + '</div>';
+                } else {
+                    result.className = 'result error';
+                    result.innerHTML = '❌ ' + (data.detail || 'Prediction failed');
+                }
+            } catch (err) {
+                result.className = 'result error';
+                result.innerHTML = '❌ Connection error';
+            }
+            result.style.display = 'block';
+            btn.disabled = false;
+            btn.textContent = '🔮 Predict Price';
+        });
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 if __name__ == "__main__":
