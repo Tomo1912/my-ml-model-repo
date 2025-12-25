@@ -379,11 +379,6 @@ def root(request: Request):
                 <button type="submit" id="submitBtn">🔮 Predict Price</button>
             </form>
             <div id="result" class="result"></div>
-            <div class="links">
-                <a href="/docs">📚 API Docs</a>
-                <a href="/health">❤️ Health</a>
-                <a href="/model/info">ℹ️ Model Info</a>
-            </div>
         </div>
     </div>
     <script>
