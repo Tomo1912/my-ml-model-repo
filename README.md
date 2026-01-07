@@ -54,13 +54,10 @@ This project demonstrates a complete **end-to-end MLOps pipeline** including:
 
 ## 🚀 Live Demo
 
-| Service | URL |
-|---------|-----|
-| **API** | http://37.27.8.233:32199 |
-| **Swagger Docs** | http://37.27.8.233:32199/docs |
-| **ArgoCD Dashboard** | http://37.27.8.233:30082 |
-
-## 📡 API Endpoints
+| Service              | URL                                 |
+|----------------------|-------------------------------------|
+| **Live App (demo)**  | https://ml-house-price.duckdns.org/ |
+| **ArgoCD Dashboard** | http://37.27.8.233:30082            |
 
 ### Health Check
 ```bash
